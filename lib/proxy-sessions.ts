@@ -1,18 +1,16 @@
-import { v4 as uuidv4 } from "uuid";
-
-// Anchored to globalThis so Turbopack HMR module reloads don't wipe the Map
-declare global { var __dqa_sessions: Map<string, { url: string; cookies: string }> | undefined; }
-if (!globalThis.__dqa_sessions) globalThis.__dqa_sessions = new Map();
-const sessions = globalThis.__dqa_sessions;
+// Stateless: session data is encoded inside the token itself.
+// No server-side Map → no module-isolation issues with Next.js Turbopack.
 
 export function createSession(url: string, cookies: string): string {
-  const id = uuidv4();
-  sessions.set(id, { url, cookies });
-  const t = setTimeout(() => sessions.delete(id), 60 * 60 * 1000);
-  t.unref?.();
-  return id;
+  return Buffer.from(JSON.stringify({ url, cookies })).toString("base64url");
 }
 
-export function getSession(id: string) {
-  return sessions.get(id) ?? null;
+export function getSession(token: string): { url: string; cookies: string } | null {
+  try {
+    const data = JSON.parse(Buffer.from(token, "base64url").toString("utf8"));
+    if (typeof data?.url !== "string") return null;
+    return { url: data.url, cookies: data.cookies ?? "" };
+  } catch {
+    return null;
+  }
 }
