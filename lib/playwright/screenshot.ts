@@ -1,6 +1,9 @@
-import { chromium } from "playwright";
+import { chromium } from "playwright-core";
 import { bufferToBase64 } from "@/lib/utils/image";
 import type { ElementStyle } from "@/types";
+
+const API_KEY = process.env.BROWSERBASE_API_KEY!;
+const PROJECT_ID = process.env.BROWSERBASE_PROJECT_ID!;
 
 export interface ViewportSize { width: number; height: number }
 
@@ -9,12 +12,24 @@ export async function captureScreenshot(
   viewport: ViewportSize,
   cookieHeader?: string
 ): Promise<{ screenshot: string; elements: ElementStyle[] }> {
-  const browser = await chromium.launch({ headless: true });
+  const createRes = await fetch("https://www.browserbase.com/v1/sessions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-BB-API-Key": API_KEY },
+    body: JSON.stringify({
+      projectId: PROJECT_ID,
+      browserSettings: { viewport, timeout: 120 },
+    }),
+  });
+  if (!createRes.ok) throw new Error(`Browserbase: ${await createRes.text()}`);
+  const { id: sessionId } = await createRes.json();
+
+  const browser = await chromium.connectOverCDP(
+    `wss://connect.browserbase.com?apiKey=${API_KEY}&sessionId=${sessionId}`
+  );
   try {
-    const context = await browser.newContext();
+    const context = browser.contexts()[0];
 
     if (cookieHeader) {
-      // Accept both "; " and ", " as separators (DevTools copies both formats)
       const separator = cookieHeader.includes("; ") ? "; " : /;\s*/.test(cookieHeader) ? /;\s*/ : "; ";
       const pairs = cookieHeader.split(separator);
       const cookies = pairs
@@ -23,19 +38,16 @@ export async function captureScreenshot(
           if (eqIdx <= 0) return null;
           const name = pair.slice(0, eqIdx).trim();
           const value = pair.slice(eqIdx + 1).trim();
-          // Cookie names must be valid HTTP token characters (no spaces, commas, etc.)
           if (!name || /[^\w!#$%&'*+\-.^`|~]/.test(name)) return null;
           return { name, value, url };
         })
         .filter((c): c is { name: string; value: string; url: string } => c !== null);
-
       if (cookies.length > 0) await context.addCookies(cookies);
     }
 
-    const page = await context.newPage();
+    const page = context.pages()[0];
     await page.setViewportSize(viewport);
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
-    // Allow SPA frameworks time to render after DOM is ready
     await page.waitForTimeout(2500);
 
     const elements: ElementStyle[] = await page.evaluate(() => {
@@ -51,14 +63,10 @@ export async function captureScreenshot(
           return {
             tag: el.tagName,
             rect: {
-              x: rect.x,
-              y: rect.y,
-              width: rect.width,
-              height: rect.height,
-              top: rect.top,
-              left: rect.left,
-              bottom: rect.bottom,
-              right: rect.right,
+              x: rect.x, y: rect.y,
+              width: rect.width, height: rect.height,
+              top: rect.top, left: rect.left,
+              bottom: rect.bottom, right: rect.right,
             },
             fontSize: styles.fontSize,
             fontWeight: styles.fontWeight,
@@ -78,5 +86,9 @@ export async function captureScreenshot(
     return { screenshot: bufferToBase64(buf as Buffer), elements };
   } finally {
     await browser.close();
+    await fetch(`https://www.browserbase.com/v1/sessions/${sessionId}`, {
+      method: "DELETE",
+      headers: { "X-BB-API-Key": API_KEY },
+    }).catch(() => {});
   }
 }
