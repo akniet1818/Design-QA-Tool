@@ -1,14 +1,16 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useAnalysisStore } from "@/stores/analysis-store";
 import { ImageSlider } from "@/components/viewer/ImageSlider";
 import { DiffOverlay, type ViewMode } from "@/components/viewer/DiffOverlay";
 import { ZoomControls } from "@/components/viewer/ZoomControls";
 import { MeasurementOverlay } from "@/components/viewer/MeasurementOverlay";
-import { LiveMeasureOverlay } from "@/components/viewer/LiveMeasureOverlay";
 import { AnnotationPins } from "@/components/viewer/AnnotationPins";
 import { useImageViewer } from "@/hooks/useImageViewer";
+
+const BROWSER_W = 1280;
+const BROWSER_H = 800;
 
 export function ViewerPanel() {
   const {
@@ -16,7 +18,6 @@ export function ViewerPanel() {
     result, highlightedBugId, setHighlightedBugId,
   } = useAnalysisStore();
 
-  const iframeRef = useRef<HTMLIFrameElement>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("live");
   const [measureActive, setMeasureActive] = useState(false);
   const [showPins, setShowPins] = useState(true);
@@ -25,58 +26,101 @@ export function ViewerPanel() {
   const [imageDims, setImageDims] = useState<{ w: number; h: number } | null>(null);
   const { zoom, zoomIn, zoomOut, resetZoom } = useImageViewer();
 
-  const liveContainerRef = useRef<HTMLDivElement>(null);
+  const [liveSessionId, setLiveSessionId] = useState<string | null>(null);
+  const [liveLoading, setLiveLoading] = useState(false);
+  const [liveError, setLiveError] = useState<string | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
 
-  const [sessionId, setSessionId] = useState<string | null>(null);
+  const destroySession = useCallback((id: string) => {
+    fetch("/api/live-browser/session", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId: id }),
+    }).catch(() => {});
+  }, []);
+
   useEffect(() => {
-    if (!stagingUrl) { setSessionId(null); return; }
-    const ac = new AbortController();
-    fetch("/api/proxy/session", {
+    if (!stagingUrl) {
+      if (sessionIdRef.current) { destroySession(sessionIdRef.current); sessionIdRef.current = null; }
+      setLiveSessionId(null);
+      setLiveError(null);
+      return;
+    }
+    let aborted = false;
+    setLiveLoading(true);
+    setLiveError(null);
+    setLiveSessionId(null);
+    if (sessionIdRef.current) { destroySession(sessionIdRef.current); sessionIdRef.current = null; }
+
+    fetch("/api/live-browser/session", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url: stagingUrl, cookies: stagingCookies }),
-      signal: ac.signal,
     })
-      .then(r => r.json())
-      .then(({ sessionId: id }) => setSessionId(id))
-      .catch(() => {});
-    return () => ac.abort();
-  }, [stagingUrl, stagingCookies]);
+      .then(r => r.ok ? r.json() : r.text().then(t => Promise.reject(new Error(t))))
+      .then(({ sessionId: id }) => {
+        if (aborted) { destroySession(id); return; }
+        sessionIdRef.current = id;
+        setLiveSessionId(id);
+        setLiveLoading(false);
+      })
+      .catch(e => {
+        if (aborted) return;
+        setLiveLoading(false);
+        setLiveError(e.message || "Could not open browser.");
+      });
 
-  const proxyUrl = sessionId ? `/api/proxy?s=${sessionId}` : null;
+    return () => {
+      aborted = true;
+      if (sessionIdRef.current) { destroySession(sessionIdRef.current); sessionIdRef.current = null; }
+      setLiveSessionId(null);
+    };
+  }, [stagingUrl, stagingCookies, destroySession]);
 
-  // If the proxied SPA navigates the iframe away from our proxy, reload it
-  const reloadCountRef = useRef(0);
-  useEffect(() => { reloadCountRef.current = 0; }, [proxyUrl]);
-  const handleIframeLoad = useCallback(() => {
-    if (!iframeRef.current || !proxyUrl) return;
-    try {
-      const loc = iframeRef.current.contentWindow?.location;
-      const stillOnProxy = loc?.pathname === "/api/proxy" && loc?.search.includes("s=");
-      if (!stillOnProxy && reloadCountRef.current < 3) {
-        reloadCountRef.current += 1;
-        iframeRef.current.src = proxyUrl;
-      }
-    } catch {
-      // cross-origin — can't inspect location, leave it
-    }
-  }, [proxyUrl]);
+  const sendEvent = useCallback((event: object) => {
+    if (!sessionIdRef.current) return;
+    fetch("/api/live-browser/event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId: sessionIdRef.current, ...event }),
+    }).catch(() => {});
+  }, []);
+
+  const handleClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    sendEvent({
+      type: "click",
+      x: (e.clientX - rect.left) * (BROWSER_W / rect.width),
+      y: (e.clientY - rect.top) * (BROWSER_H / rect.height),
+    });
+  }, [sendEvent]);
+
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+    e.preventDefault();
+    sendEvent({ type: "scroll", deltaX: e.deltaX, deltaY: e.deltaY });
+  }, [sendEvent]);
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    // Let browser shortcuts pass through
+    if (e.metaKey || e.ctrlKey) return;
+    e.preventDefault();
+    sendEvent({ type: "keydown", key: e.key });
+  }, [sendEvent]);
+
+  const streamUrl = liveSessionId ? `/api/live-browser/stream?s=${liveSessionId}` : null;
 
   const hasContent = !!figmaImage || !!stagingImage || !!stagingUrl;
   const bugs = result?.bugs ?? [];
 
-  // "diff" tab is repurposed as "pins" — we show staging + pins instead of red diff
   const currentImage =
     viewMode === "figma" ? figmaImage :
     viewMode === "staging" || viewMode === "diff" ? stagingImage :
     stagingImage ?? figmaImage ?? null;
 
-  const handleMeasure = () => setMeasureActive(m => !m);
-
   const MeasureBtn = () => (
     <button
       type="button"
-      onClick={handleMeasure}
+      onClick={() => setMeasureActive(m => !m)}
       className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border transition-colors ${
         measureActive
           ? "bg-violet-600 border-violet-500 text-white"
@@ -97,7 +141,6 @@ export function ViewerPanel() {
         <DiffOverlay mode={viewMode} onChange={(m) => { setViewMode(m); if (m !== "live") setMeasureActive(false); }} diffPercentage={result?.diffPercentage} />
         <div className="flex items-center gap-2">
           <MeasureBtn />
-          {/* Pin toggle — only relevant in staging/diff/figma modes */}
           {viewMode !== "live" && viewMode !== "slider" && bugs.length > 0 && (
             <button
               type="button"
@@ -119,29 +162,37 @@ export function ViewerPanel() {
       </div>
 
       <div className="flex-1 overflow-hidden flex flex-col">
-        {/* ── Live view ── */}
+        {/* ── Live view (interactive Playwright browser stream) ── */}
         <div
-          ref={liveContainerRef}
           className="relative overflow-hidden"
           style={{ display: viewMode === "live" ? "flex" : "none", flex: 1, flexDirection: "column" }}
         >
-          <LiveMeasureOverlay iframeRef={iframeRef} enabled={measureActive && viewMode === "live"} />
-          {proxyUrl ? (
-            <>
-              <iframe
-                key={proxyUrl}
-                ref={iframeRef}
-                src={proxyUrl}
-                onLoad={handleIframeLoad}
-                className="flex-1 w-full border-none"
-                sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"
-                title="Live staging"
+          {streamUrl ? (
+            <div className="relative flex-1 overflow-auto bg-white">
+              {/* MJPEG stream from headless Chromium */}
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                key={streamUrl}
+                src={streamUrl}
+                alt="Live browser"
+                className="w-full block"
+                draggable={false}
+              />
+              {/* Transparent overlay to capture all input events */}
+              <div
+                className="absolute inset-0"
+                style={{ cursor: "default" }}
+                onClick={handleClick}
+                onWheel={handleWheel}
+                onKeyDown={handleKeyDown}
+                tabIndex={0}
               />
               {figmaImage && (
                 <img
                   src={figmaImage}
                   alt="Figma overlay"
                   style={{ position: "absolute", top: 0, left: 0, width: `${figmaScale}%`, height: "auto", opacity: overlayOpacity, pointerEvents: "none" }}
+                  draggable={false}
                 />
               )}
               {figmaImage && (
@@ -161,13 +212,27 @@ export function ViewerPanel() {
                   <button type="button" onClick={() => { setOverlayOpacity(0.4); setFigmaScale(100); }} className="text-[10px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors">Reset</button>
                 </div>
               )}
-            </>
+            </div>
+          ) : liveLoading ? (
+            <div className="flex-1 flex flex-col items-center justify-center gap-3 text-zinc-400 dark:text-zinc-600">
+              <svg className="animate-spin w-6 h-6" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              <span className="text-sm">Opening browser…</span>
+              <span className="text-xs opacity-60">Launching Chromium and loading the page</span>
+            </div>
+          ) : liveError ? (
+            <div className="flex-1 flex flex-col items-center justify-center gap-2 text-zinc-400 dark:text-zinc-600">
+              <p className="text-sm">⚠ {liveError}</p>
+              <p className="text-xs opacity-60">Check the URL and cookies in the left panel.</p>
+            </div>
           ) : (
             <div className="flex-1 flex flex-col items-center justify-center gap-4 text-zinc-400 dark:text-zinc-600">
               <svg className="w-20 h-20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={0.8} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
               </svg>
-              <p className="text-sm">Paste a staging URL to view the live site</p>
+              <p className="text-sm">Paste a staging URL to open the live browser</p>
               <p className="text-xs opacity-60">Add auth cookies if login is required</p>
             </div>
           )}

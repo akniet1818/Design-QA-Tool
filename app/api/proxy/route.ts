@@ -4,8 +4,25 @@ import { getSession } from "@/lib/proxy-sessions";
 export const runtime = "nodejs";
 export const maxDuration = 30;
 
-
 const API_PROXY_PATH = "/api/proxy-api";
+
+const COOKIE_ATTR_NAMES = new Set([
+  "path", "domain", "expires", "max-age", "secure", "httponly", "samesite",
+]);
+
+// Normalize a raw cookie string pasted from DevTools (any format) into a clean Cookie header value.
+function normalizeCookies(raw: string): string {
+  return raw
+    .split(/[\r\n]+/)            // handle newline-separated (Application tab copy)
+    .flatMap(line => line.split(";"))
+    .map(s => s.trim())
+    .filter(s => {
+      if (!s || !s.includes("=")) return false;
+      const name = s.slice(0, s.indexOf("=")).trim().toLowerCase();
+      return !COOKIE_ATTR_NAMES.has(name);
+    })
+    .join("; ");
+}
 
 function buildAuthScript(sessionId: string, cookies: string, targetOrigin: string): string {
   const sid = JSON.stringify(sessionId);
@@ -16,12 +33,16 @@ function buildAuthScript(sessionId: string, cookies: string, targetOrigin: strin
   );
   return `<script>(function(){
 var _s=${sid},_o=${origin},_a=${api};
-${cookiePairs}.forEach(function(c){try{document.cookie=c+';path=/;SameSite=None';}catch(e){}});
+${cookiePairs}.forEach(function(c){try{document.cookie=c+';path=/';}catch(e){}});
 var _f=window.fetch;
 window.fetch=function(u,opts){
   if(typeof u==='string'){
     if(u[0]==='/')u=_a+'?s='+_s+'&p='+encodeURIComponent(u);
     else if(u.indexOf(_o)===0)u=_a+'?s='+_s+'&p='+encodeURIComponent(u.slice(_o.length)||'/');
+  } else if(u && typeof u==='object' && u.url){
+    var url=u.url;
+    if(url[0]==='/')u=new Request(_a+'?s='+_s+'&p='+encodeURIComponent(url),u);
+    else if(url.indexOf(_o)===0)u=new Request(_a+'?s='+_s+'&p='+encodeURIComponent(url.slice(_o.length)||'/'),u);
   }
   return _f.call(this,u,opts);
 };
@@ -52,13 +73,13 @@ export async function GET(req: NextRequest) {
   const sessionId = params.get("s");
   if (sessionId) {
     const session = getSession(sessionId);
-    if (session) { targetUrl = session.url; cookieHeader = session.cookies; }
+    if (session) { targetUrl = session.url; cookieHeader = normalizeCookies(session.cookies); }
   }
 
   // Fall back to direct params (backward compat)
   if (!targetUrl) {
     targetUrl = params.get("url");
-    cookieHeader = params.get("cookies") ?? "";
+    cookieHeader = normalizeCookies(params.get("cookies") ?? "");
   }
 
   if (!targetUrl) {
@@ -117,7 +138,7 @@ export async function GET(req: NextRequest) {
         html = headInjection + html;
       }
 
-      return new Response(html, { status: res.status, headers: outHeaders });
+      return new Response(html, { status: 200, headers: outHeaders });
     }
 
     // Non-HTML assets: proxy bytes through unchanged
