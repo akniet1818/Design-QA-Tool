@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "postinstall": "npx playwright install chromium"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.0",
@@ -24,6 +25,7 @@
     "react": "19.2.4",
     "react-compare-slider": "^4.0.0",
     "react-dom": "19.2.4",
+    "playwright": "^1.59.1",
     "sharp": "^0.34.5",
     "uuid": "^14.0.0",
     "zustand": "^5.0.12"
@@ -37,7 +39,6 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/uuid": "^10.0.0",
-    "playwright": "^1.59.1",
     "tailwindcss": "^4",
     "typescript": "^5"
   }
