@@ -1,9 +1,8 @@
 @import "tailwindcss";
+@import "@heroui/react/styles";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+/* Class-based dark mode for Tailwind v4 */
+@custom-variant dark (&:where(.dark, .dark *));
 
 @theme inline {
   --color-background: var(--background);
@@ -12,15 +11,12 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+body {
+  background: white;
+  color: #18181b; /* zinc-900 */
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+.dark body {
+  background: #09090b; /* zinc-950 */
+  color: #f4f4f5; /* zinc-100 */
 }
