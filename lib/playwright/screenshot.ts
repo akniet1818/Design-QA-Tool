@@ -1,9 +1,6 @@
-import { chromium } from "playwright-core";
+import { chromium } from "playwright";
 import { bufferToBase64 } from "@/lib/utils/image";
 import type { ElementStyle } from "@/types";
-
-const API_KEY = process.env.BROWSERBASE_API_KEY!;
-const PROJECT_ID = process.env.BROWSERBASE_PROJECT_ID!;
 
 export interface ViewportSize { width: number; height: number }
 
@@ -12,22 +9,9 @@ export async function captureScreenshot(
   viewport: ViewportSize,
   cookieHeader?: string
 ): Promise<{ screenshot: string; elements: ElementStyle[] }> {
-  const createRes = await fetch("https://www.browserbase.com/v1/sessions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-BB-API-Key": API_KEY },
-    body: JSON.stringify({
-      projectId: PROJECT_ID,
-      browserSettings: { viewport, timeout: 120 },
-    }),
-  });
-  if (!createRes.ok) throw new Error(`Browserbase: ${await createRes.text()}`);
-  const { id: sessionId } = await createRes.json();
-
-  const browser = await chromium.connectOverCDP(
-    `wss://connect.browserbase.com?apiKey=${API_KEY}&sessionId=${sessionId}`
-  );
+  const browser = await chromium.launch({ headless: true });
   try {
-    const context = browser.contexts()[0];
+    const context = await browser.newContext();
 
     if (cookieHeader) {
       const separator = cookieHeader.includes("; ") ? "; " : /;\s*/.test(cookieHeader) ? /;\s*/ : "; ";
@@ -45,7 +29,7 @@ export async function captureScreenshot(
       if (cookies.length > 0) await context.addCookies(cookies);
     }
 
-    const page = context.pages()[0];
+    const page = await context.newPage();
     await page.setViewportSize(viewport);
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
     await page.waitForTimeout(2500);
@@ -86,9 +70,5 @@ export async function captureScreenshot(
     return { screenshot: bufferToBase64(buf as Buffer), elements };
   } finally {
     await browser.close();
-    await fetch(`https://www.browserbase.com/v1/sessions/${sessionId}`, {
-      method: "DELETE",
-      headers: { "X-BB-API-Key": API_KEY },
-    }).catch(() => {});
   }
 }

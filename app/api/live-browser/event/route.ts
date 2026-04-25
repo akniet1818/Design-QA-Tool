@@ -1,45 +1,14 @@
 import { NextRequest } from "next/server";
-import { connectToLiveSession } from "@/lib/live-sessions";
-import type { Browser, Page } from "playwright-core";
+import { getLiveSession } from "@/lib/live-sessions";
 
 export const runtime = "nodejs";
 
-// Per-instance connection cache — reuse CDP connections for rapid consecutive events (e.g. typing).
-// Evicted after 5 seconds of inactivity.
-const cache = new Map<string, { browser: Browser; page: Page; timer: ReturnType<typeof setTimeout> }>();
-
-async function getConn(sessionId: string) {
-  const hit = cache.get(sessionId);
-  if (hit) {
-    clearTimeout(hit.timer);
-    hit.timer = setTimeout(() => evict(sessionId), 5000);
-    return hit;
-  }
-  const conn = await connectToLiveSession(sessionId);
-  const entry = { ...conn, timer: setTimeout(() => evict(sessionId), 5000) };
-  cache.set(sessionId, entry);
-  return entry;
-}
-
-function evict(id: string) {
-  const e = cache.get(id);
-  if (!e) return;
-  cache.delete(id);
-  e.browser.close().catch(() => {});
-}
-
 export async function POST(req: NextRequest) {
   const { sessionId, type, x, y, deltaX, deltaY, key } = await req.json();
-  if (!sessionId) return new Response("Missing sessionId", { status: 400 });
+  const session = getLiveSession(sessionId);
+  if (!session) return new Response("Session not found", { status: 404 });
 
-  let conn: { page: Page };
-  try {
-    conn = await getConn(sessionId);
-  } catch {
-    return new Response("Session not found", { status: 404 });
-  }
-
-  const { page } = conn;
+  const { page } = session;
   try {
     switch (type) {
       case "click":
